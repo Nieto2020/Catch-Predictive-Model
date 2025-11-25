@@ -3,81 +3,79 @@ import numpy as np
 from pathlib import Path
 
 def cargar_y_limpiar_datos(ruta_archivo):
-   
-    
-    # --- PARTE 1: CARGA Y CONSOLIDACIÓN ---
-    print(f"Iniciando carga desde: {ruta_archivo}")
-    
-    # Carga todas las hojas en un diccionario {nombre_hoja: DataFrame}
-    diccionario_de_hojas = pd.read_excel(ruta_archivo, sheet_name=None)
-    
+    # --- PARTE 1: CARGA Y CONSOLIDACIÓN SELECTIVA ---
+    print(f"Iniciando carga selectiva desde: {ruta_archivo}")
+
+    # Columnas a seleccionar: F (índice 5) y GW-GZ (índices 202 a 205)
+    # Nota: Los índices en pandas son base 0. F=5, GW=202, GX=203, GY=204, GZ=205
+    columnas_a_usar = [5, 202, 203, 204, 205]
+    nombres_nuevos = ['compañia', 'Capacitación', 'Bajo Supervisión', 'Sin Supervisión', 'Tope salarial']
+
+    try:
+        # Carga todas las hojas, pero solo las columnas especificadas
+        diccionario_de_hojas = pd.read_excel(
+            ruta_archivo, 
+            sheet_name=None, 
+            usecols=columnas_a_usar,
+            header=None, # No hay encabezados en las filas de datos
+            skiprows=2 # Omitir la fila de encabezado original
+        )
+    except ValueError as e:
+        print(f"Error al leer las columnas: {e}")
+        print("Es posible que las columnas especificadas (F, GW-GZ) no existan en todas las hojas del Excel.")
+        return pd.DataFrame() # Devuelve un DataFrame vacío si hay error
+
     print(f"Se encontraron {len(diccionario_de_hojas)} hojas. Consolidando...")
     
-    # Lista para guardar los DataFrames individuales
     lista_dfs = []
-
-    # Bucle para recorrer cada hoja en el diccionario
     for nombre_hoja, df_hoja in diccionario_de_hojas.items():
-        
+        df_hoja.columns = nombres_nuevos
         df_hoja['fuente_encuesta'] = nombre_hoja
         lista_dfs.append(df_hoja)
         
-    # Concatena todos los DataFrames de la lista en uno solo
     df = pd.concat(lista_dfs, ignore_index=True)
     
-    print(f"Datos consolidados. {len(df)} filas cargadas.")
-    print("Iniciando proceso de limpieza estándar...")
+    print(f"Datos consolidados. {len(df)} filas cargadas con columnas seleccionadas.")
+    print("Iniciando proceso de limpieza...")
 
-    # --- PARTE 2: PROCESO DE LIMPIEZA ESTÁNDAR ---
+    # --- PARTE 2: TRANSFORMACIÓN Y LIMPIEZA ---
 
-    print("\n--- Estado INICIAL de los datos (tipos y nulos) ---")
-    df.info()
+    # Unificar las 4 columnas de salario en una sola: 'salario_diario'
+    columnas_salario = ['compañia', 'Capacitación', 'Bajo Supervisión', 'Sin Supervisión', 'Tope salarial']
+    
+    df = df.melt(
+        id_vars=['compañia', 'fuente_encuesta'], 
+        value_vars=columnas_salario, 
+        var_name='columna_origen_salario', 
+        value_name='salario_diario'
+    )
+    
+    # --- PASO 1: Corrección de Tipos y Manejo de Nulos ---
+    print("\n--- PASO 1: Limpiando y filtrando datos de salario... ---")
 
-    # --- PASO 1: Manejo de Valores Nulos (NaN) ---
-    print("\n--- PASO 1: Manejando valores nulos... ---")
+    # Forzar 'salario_diario' a ser numérico. Si hay errores, se convierten en NaN.
+    df['salario_diario'] = pd.to_numeric(df['salario_diario'], errors='coerce')
     
-    # Primero, calculamos la mediana de la columna 'salario'
-    if 'salario' in df.columns:
-        mediana_salario = df['salario'].median()
-        # Rellenamos los NaN (nulos) en 'salario' con el valor de la mediana
-        df['salario'] = df['salario'].fillna(mediana_salario)
-        print(f"Valores nulos de 'salario' rellenados con la mediana: {mediana_salario}")
+    # Eliminar filas donde el salario es nulo (incluyendo los que no eran numéricos)
+    df.dropna(subset=['salario_diario'], inplace=True)
     
-    # Estrategia para 'pregunta_abierta_1': Es texto libre.
-    if 'pregunta_abierta_1' in df.columns:
-        df['pregunta_abierta_1'] = df['pregunta_abierta_1'].fillna('')
-        print("Valores nulos de 'pregunta_abierta_1' rellenados con '' (texto vacío).")
+    # Ahora que es numérico, eliminar filas donde el salario es cero o menor
+    df = df[df['salario_diario'] > 0]
 
-    # Estrategia para 'sector_empresa': Es categórico.
-    # Rellenamos con una categoría específica "Desconocido".
-    if 'sector_empresa' in df.columns:
-        df['sector_empresa'] = df['sector_empresa'].fillna('Desconocido')
-        print("Valores nulos de 'sector_empresa' rellenados con 'Desconocido'.")
-    
-    
-    
-    # --- PASO 2: Corrección de Tipos de Datos ---
-    print("\n--- PASO 2: Corrigiendo tipos de datos... ---")
+    print(f"Columnas de salario unificadas y limpiadas. Total de registros con salario válido: {len(df)}")
 
+    # Limpiar la columna 'compañia'
+    df['compañia'] = df['compañia'].fillna('Desconocido').astype(str).str.strip()
     
-    if 'salario' in df.columns:
-        # Forzamos 'salario' a ser un número. 
-        df['salario'] = pd.to_numeric(df['salario'], errors='coerce')
-        # Como 'coerce' pudo crear NUEVOS NaN, volvemos a rellenarlos por si acaso.
-        mediana_salario = df['salario'].median()
-        df['salario'] = df['salario'].fillna(mediana_salario)
-        print("Tipo de dato de 'salario' asegurado como numérico.")
-    
-    # Las columnas categóricas (como 'sector' o 'region') se optimizan
-    # usando el tipo 'category'. Esto ahorra memoria y acelera los cálculos.
-    if 'sector_empresa' in df.columns:
-        df['sector_empresa'] = df['sector_empresa'].astype('category')
-        print("Tipo de dato de 'sector_empresa' optimizado a 'category'.")
+    # Eliminar filas donde 'compañia' es 'nan' o vacía (después de convertir a string)
+    df = df[df['compañia'] != 'nan']
+    df = df[df['compañia'] != '']
+    df = df[df['compañia'] != 'Desconocido']
 
-    # --- PASO 3: Manejo de Duplicados ---
-    print("\n--- PASO 3: Buscando y eliminando duplicados... ---")
+    print(f"Filas con valores de compañia válidos: {len(df)}")
 
-    # Primero, contamos cuántas filas están completamente duplicadas
+    # --- PASO 2: Manejo de Duplicados ---
+    print("\n--- PASO 2: Buscando y eliminando duplicados... ---")
     duplicados = df.duplicated().sum()
     print(f"Se encontraron {duplicados} filas duplicadas.")
     
@@ -85,54 +83,38 @@ def cargar_y_limpiar_datos(ruta_archivo):
         df.drop_duplicates(inplace=True)
         print("Filas duplicadas eliminadas.")
 
-    # --- PASO 4: Normalización de Texto  ---
-    print("\n--- PASO 4: Normalizando texto... ---")
-    
-    # --Lo pasamos todo a minúsculas.
-    
-    if 'sector_empresa' in df.columns:
-        df['sector_empresa'] = df['sector_empresa'].str.lower()
-        print("Texto de 'sector_empresa' convertido a minúsculas.")
-    
     # --- FINALIZACIÓN ---
-    print("\n¡Proceso de limpieza estándar completado!")
+    print("\n¡Proceso de limpieza completado!")
+    print("\n--- Resumen de los datos limpios ---")
+    print(df.info())
+    print("\n--- Muestra de los datos finales ---")
+    print(df.head())
     
-    # Imprime un resumen de los datos DESPUÉS de limpiar
-    print("\n--- Estado FINAL de los datos (tipos y nulos) ---")
-    df.info()
+    print("\n--- Compañías presentes en los datos limpios ---")
+    print(f"Total de compañías únicas: {df['compañia'].nunique()}")
+    print("\nDetalle por compañía:")
+    print(df['compañia'].value_counts().sort_index())
     
-    # La función devuelve el DataFrame limpio y listo para usarse
     return df
 
 if __name__ == "__main__":
     datos_dir = Path("datos")
-
-    # Archivo principal que preferimos leer, en caso de no encontrarlo, buscamos cualquier otro Excel en la carpeta
     principal = datos_dir / "BASE HISTORICA.xlsx"
 
-    if principal.exists():
-        ruta = principal
-        print(f"Usando archivo principal: {ruta.name}")
-    else:
-        print(f"Archivo principal no encontrado: {principal.name}")
+    if not principal.exists():
+        raise FileNotFoundError(f"No se encontró el archivo '{principal.name}' en la carpeta '{datos_dir}'.")
 
-        # Si existe la carpeta, buscar cualquier archivo excel como fallback
-        if datos_dir.exists():
-            excels = [p for p in datos_dir.iterdir() if p.suffix.lower() in ('.xls', '.xlsx', '.xlsm', '.xlsb')]
-            if excels:
-                # Tomamos el primero encontrado; se informa al usuario que es fallback
-                ruta = excels[0]
-                print(f"Usando archivo fallback encontrado en 'datos/': {ruta.name}")
-            else:
-                # No hay archivos excel en la carpeta
-                print("Archivos disponibles en 'datos/':")
-                for p in datos_dir.iterdir():
-                    print(f" - {p.name}")
-                raise FileNotFoundError(
-                    "No se encontró 'BASE HISTORICA.xlsx' ni ningún archivo .xls/.xlsx en la carpeta 'datos/'."
-                )
-        else:
-            raise FileNotFoundError("La carpeta 'datos' no existe en el directorio actual.")
+    print(f"Usando archivo: {principal.name}")
+    df_limpio = cargar_y_limpiar_datos(str(principal))
 
-    # Ejecuta la función con la ruta determinada (principal o fallback)
-    df = cargar_y_limpiar_datos(str(ruta))
+    if not df_limpio.empty:
+        # Opcional: Guardar el resultado limpio en un nuevo archivo
+        resultados_dir = Path("resultados")
+        resultados_dir.mkdir(exist_ok=True)
+        
+        # Ordenar por compañía para facilitar la lectura
+        df_limpio = df_limpio.sort_values(by=['compañia']).reset_index(drop=True)
+        
+        ruta_salida = resultados_dir / "datos_limpios.csv"
+        df_limpio.to_csv(ruta_salida, index=False)
+        print(f"\nDatos limpios guardados en: {ruta_salida}")
